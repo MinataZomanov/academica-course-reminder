@@ -2,7 +2,7 @@ name: Course Reminder
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -26,6 +26,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Generate schedule
+        run: |
+          python generate_schedule.py
+
       - name: Run checker
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -33,13 +37,13 @@ jobs:
         run: |
           python checker.py
 
-      - name: Save sent lessons
+      - name: Save generated schedule and sent state
         run: |
           git config user.name "Course Reminder Bot"
           git config user.email "course-reminder@users.noreply.github.com"
 
-          git add sent.json
+          git add schedule.json sent.json
 
-          git diff --cached --quiet || git commit -m "Update sent lessons"
+          git diff --cached --quiet || git commit -m "Update course schedule"
 
           git push
