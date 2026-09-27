@@ -9,5 +9,11 @@
       "binding": "SENT_KV",
       "id": "b0c65a1e96d145a9b6238fb2fed7c42f"
     }
-  ]
+  ],
+
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  }
 }
