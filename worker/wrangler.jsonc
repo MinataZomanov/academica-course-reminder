@@ -2,5 +2,12 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "academica-course-reminder",
   "main": "src/index.js",
-  "compatibility_date": "2026-09-27"
+  "compatibility_date": "2026-09-27",
+
+  "kv_namespaces": [
+    {
+      "binding": "SENT_KV",
+      "id": "b0c65a1e96d145a9b6238fb2fed7c42f"
+    }
+  ]
 }
