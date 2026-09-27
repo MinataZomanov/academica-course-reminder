@@ -161,11 +161,50 @@ function sortByOpenTime(a, b) {
 }
 
 
+/*
+ * Проверяет открывшиеся уроки и отправляет их в канал.
+ * Возвращает количество новых отправленных уроков.
+ */
+async function checkAndSendOpened(env) {
+  const lessons = await loadSchedule(env);
+  const sent = await getSent(env);
+
+  const available = lessons
+    .filter(lesson => isOpened(lesson) && !sent.has(lesson.id))
+    .sort(sortByOpenTime);
+
+  if (available.length === 0) {
+    return 0;
+  }
+
+  let count = 0;
+
+  for (const lesson of available) {
+    const text =
+      "🔔 Новый урок открыт!\n\n" +
+      lessonText(lesson, false);
+
+    await sendTelegram(
+      env,
+      env.TELEGRAM_CHAT_ID,
+      text
+    );
+
+    sent.add(lesson.id);
+    count++;
+  }
+
+  await saveSent(env, sent);
+
+  return count;
+}
+
+
 async function commandStart(env, chatId) {
   const text =
     "👋 Привет!\n\n" +
     "Я Academica Course Bot.\n\n" +
-    "Я умею показывать расписание курса и проверять открывшиеся уроки.\n\n" +
+    "Я умею показывать расписание курса и автоматически сообщать об открытии новых уроков.\n\n" +
     "Используй /help, чтобы увидеть команды.";
 
   await sendTelegram(env, chatId, text);
@@ -218,7 +257,10 @@ async function commandToday(env, chatId, lessons) {
   const today = getAlmatyDate();
 
   const todayLessons = lessons
-    .filter(lesson => getAlmatyDate(new Date(lesson.open_at)) === today)
+    .filter(
+      lesson =>
+        getAlmatyDate(new Date(lesson.open_at)) === today
+    )
     .sort(sortByOpenTime);
 
   if (todayLessons.length === 0) {
@@ -263,14 +305,17 @@ async function commandSchedule(env, chatId, lessons) {
   let currentDate = null;
 
   for (const lesson of upcoming) {
-    const date = getAlmatyDate(new Date(lesson.open_at));
+    const date = getAlmatyDate(
+      new Date(lesson.open_at)
+    );
 
     if (date !== currentDate) {
       currentDate = date;
       text += `📅 ${formatDate(lesson.open_at)}\n\n`;
     }
 
-    text += `⏰ ${formatTime(lesson.open_at)} | ${lesson.title}\n`;
+    text +=
+      `⏰ ${formatTime(lesson.open_at)} | ${lesson.title}\n`;
   }
 
   await sendTelegram(env, chatId, text.trim());
@@ -288,7 +333,7 @@ async function commandStatus(env, chatId, lessons) {
     `📚 Всего уроков: ${lessons.length}\n` +
     `🟢 Открыто: ${opened}\n` +
     `🔒 Предстоит: ${upcoming}\n` +
-    `📨 Отправлено напоминаний: ${sent.size}`;
+    `📨 Отправлено уведомлений: ${sent.size}`;
 
   await sendTelegram(env, chatId, text);
 }
@@ -297,7 +342,10 @@ async function commandStatus(env, chatId, lessons) {
 async function commandOpened(env, chatId, lessons) {
   const opened = lessons
     .filter(isOpened)
-    .sort((a, b) => new Date(b.open_at) - new Date(a.open_at))
+    .sort(
+      (a, b) =>
+        new Date(b.open_at) - new Date(a.open_at)
+    )
     .slice(0, 10);
 
   if (opened.length === 0) {
@@ -321,14 +369,10 @@ async function commandOpened(env, chatId, lessons) {
 }
 
 
-async function commandCheck(env, chatId, lessons) {
-  const sent = await getSent(env);
+async function commandCheck(env, chatId) {
+  const count = await checkAndSendOpened(env);
 
-  const available = lessons
-    .filter(lesson => isOpened(lesson) && !sent.has(lesson.id))
-    .sort(sortByOpenTime);
-
-  if (available.length === 0) {
+  if (count === 0) {
     await sendTelegram(
       env,
       chatId,
@@ -337,25 +381,6 @@ async function commandCheck(env, chatId, lessons) {
 
     return;
   }
-
-  let count = 0;
-
-  for (const lesson of available) {
-    const text =
-      "🔔 Новый урок открыт!\n\n" +
-      lessonText(lesson, false);
-
-    await sendTelegram(
-      env,
-      env.TELEGRAM_CHAT_ID,
-      text
-    );
-
-    sent.add(lesson.id);
-    count++;
-  }
-
-  await saveSent(env, sent);
 
   await sendTelegram(
     env,
@@ -396,7 +421,7 @@ async function handleCommand(env, chatId, command, lessons) {
       break;
 
     case "/check":
-      await commandCheck(env, chatId, lessons);
+      await commandCheck(env, chatId);
       break;
 
     default:
@@ -410,6 +435,10 @@ async function handleCommand(env, chatId, command, lessons) {
 
 
 export default {
+
+  /*
+   * Telegram webhook
+   */
   async fetch(request, env) {
 
     if (request.method !== "POST") {
@@ -455,6 +484,31 @@ export default {
           status: 500
         }
       );
+    }
+  },
+
+
+  /*
+   * Автоматическая проверка по Cron Trigger
+   */
+  async scheduled(controller, env, ctx) {
+
+    try {
+
+      const count = await checkAndSendOpened(env);
+
+      console.log(
+        `Cron ${controller.cron}: sent ${count} lessons`
+      );
+
+    } catch (error) {
+
+      console.error(
+        "Scheduled check failed:",
+        error
+      );
+
+      throw error;
     }
   }
 };
