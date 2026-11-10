@@ -1,12 +1,18 @@
-name: Course Reminder
+
+name: Course Schedule Generator
 
 on:
-  schedule:
-    - cron: "17 * * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - "lessons.xlsx"
+      - "generate_schedule.py"
+
   workflow_dispatch:
 
 jobs:
-  check-course:
+  generate-schedule:
     runs-on: ubuntu-latest
 
     permissions:
@@ -24,25 +30,18 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install openpyxl
 
       - name: Generate schedule
         run: |
           python generate_schedule.py
 
-      - name: Run checker
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Save generated schedule
         run: |
-          python checker.py
-
-      - name: Save generated schedule and sent state
-        run: |
-          git config user.name "Course Reminder Bot"
+          git config user.name "Course Schedule Generator"
           git config user.email "course-reminder@users.noreply.github.com"
 
-          git add schedule.json sent.json
+          git add schedule.json
 
           git diff --cached --quiet || git commit -m "Update course schedule"
 
