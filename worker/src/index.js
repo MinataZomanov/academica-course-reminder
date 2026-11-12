@@ -452,6 +452,13 @@ export default {
 
       const message = update.message;
 
+      if (message?.chat) {
+    console.log("TELEGRAM_CHAT_INFO", JSON.stringify({
+    chat_id: message.chat.id,
+    title: message.chat.title ?? null,
+    type: message.chat.type
+        }));
+      }
       if (!message || !message.text) {
         return new Response("OK");
       }
