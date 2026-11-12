@@ -1,14 +1,9 @@
 
-name: Course Schedule Generator
+name: Course Reminder
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "lessons.xlsx"
-      - "generate_schedule.py"
-
+  schedule:
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -30,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install openpyxl
+          pip install -r requirements.txt
 
       - name: Generate schedule
         run: |
@@ -38,7 +33,7 @@ jobs:
 
       - name: Save generated schedule
         run: |
-          git config user.name "Course Schedule Generator"
+          git config user.name "Course Reminder Bot"
           git config user.email "course-reminder@users.noreply.github.com"
 
           git add schedule.json
