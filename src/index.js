@@ -235,6 +235,50 @@ async function sendTelegram(env, chatId, text) {
   return result;
 }
 
+
+// Отправка автоматических уведомлений во все настроенные чаты.
+function getNotificationChatIds(env) {
+  const configured = env.TELEGRAM_CHAT_IDS?.trim();
+
+  const ids = configured
+    ? configured.split(",")
+    : [env.TELEGRAM_CHAT_ID];
+
+  return [...new Set(
+    ids.map(id => String(id ?? "").trim()).filter(Boolean)
+  )];
+}
+
+async function sendTelegramToAll(env, text) {
+  const chatIds = getNotificationChatIds(env);
+
+  if (chatIds.length === 0) {
+    throw new Error("No Telegram notification recipients configured");
+  }
+
+  const results = await Promise.allSettled(
+    chatIds.map(chatId => sendTelegram(env, chatId, text))
+  );
+
+  const failed = results
+    .map((result, index) => ({
+      result,
+      chatId: chatIds[index]
+    }))
+    .filter(item => item.result.status === "rejected");
+
+  if (failed.length > 0) {
+    throw new Error(
+      `Failed to send notification to: ${
+        failed.map(item => item.chatId).join(", ")
+      }`
+    );
+  }
+
+  return results.length;
+}
+
+
 // ============================================================
 // KV DEDUPLICATION
 // ============================================================
@@ -314,11 +358,7 @@ async function checkAndSendReminders(env) {
     );
 
     // Сначала отправляем сообщение в Telegram.
-    await sendTelegram(
-      env,
-      env.TELEGRAM_CHAT_ID,
-      message
-    );
+   await sendTelegramToAll(env, message);
 
     // После успешной отправки отмечаем все уроки группы.
     for (const lesson of group.lessons) {
