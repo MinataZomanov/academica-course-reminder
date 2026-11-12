@@ -175,6 +175,21 @@ async function loadSchedule(env) {
 
   const file = await response.json();
 
+  if (!response.ok || !result.ok) {
+  console.error(
+    "TELEGRAM_API_ERROR",
+    JSON.stringify({
+      status: response.status,
+      error_code: result.error_code,
+      description: result.description
+    })
+  );
+
+  throw new Error(
+    `Telegram error: ${JSON.stringify(result)}`
+  );
+}
+
   if (!file.content) {
     throw new Error("schedule.json has no content");
   }
