@@ -7,8 +7,8 @@ const SCHEDULE_PATH = "schedule.json";
 const TIMEZONE = "Asia/Almaty";
 const REMINDER_MINUTES = 15;
 
-// Не отправляем исторические уроки при первом запуске.
 // Допускаем задержку Cron до 20 минут.
+// Старые уроки при первом запуске не рассылаются.
 const OPENED_GRACE_MINUTES = 20;
 
 const REMINDER_TTL = 60 * 60 * 24 * 365 * 2;
@@ -27,6 +27,13 @@ const timeFormatter = new Intl.DateTimeFormat("ru-RU", {
   hourCycle: "h23"
 });
 
+const localDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: TIMEZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+});
+
 function formatDate(value) {
   return dateFormatter.format(new Date(value));
 }
@@ -36,13 +43,7 @@ function formatTime(value) {
 }
 
 function getLocalDate() {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(new Date());
-
+  const parts = localDateFormatter.formatToParts(new Date());
   const values = {};
 
   for (const part of parts) {
@@ -64,6 +65,7 @@ function isOpened(lesson) {
   return getLessonTime(lesson) <= Date.now();
 }
 
+// Группировка расписания по календарной дате для /schedule.
 function groupByDate(lessons) {
   const groups = new Map();
 
@@ -80,12 +82,64 @@ function groupByDate(lessons) {
   return groups;
 }
 
+// Группировка уведомлений по точному времени открытия.
+// Уроки с одинаковой датой и временем попадут в одну публикацию.
+function groupByOpenTime(lessons) {
+  const groups = new Map();
+
+  for (const lesson of lessons) {
+    const timestamp = String(getLessonTime(lesson));
+
+    if (!groups.has(timestamp)) {
+      groups.set(timestamp, []);
+    }
+
+    groups.get(timestamp).push(lesson);
+  }
+
+  return [...groups.entries()]
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([timestamp, items]) => ({
+      timestamp: Number(timestamp),
+      lessons: items.sort((a, b) =>
+        a.title.localeCompare(b.title, "ru")
+      )
+    }));
+}
+
 function lessonLabel(lesson) {
   return (
     `📚 ${lesson.title}\n` +
     `📅 ${formatDate(lesson.open_at)}\n` +
     `⏰ ${formatTime(lesson.open_at)}` +
     (lesson.homework ? "\n📝 Есть домашнее задание" : "")
+  );
+}
+
+// Формирование одной сводной публикации для всей группы уроков.
+function buildGroupedNotification(lessons, type, minutesLeft = null) {
+  const first = lessons[0];
+
+  const lessonList = lessons
+    .map(lesson =>
+      `• ${lesson.title}${lesson.homework ? " 📝" : ""}`
+    )
+    .join("\n");
+
+  if (type === "reminder15") {
+    return (
+      `⏳ ДО ОТКРЫТИЯ УРОКОВ ОСТАЛОСЬ ${minutesLeft} МИН.! \n\n` +
+      `${lessonList}\n\n` +
+      `🕒 Открытие: ${formatDate(first.open_at)} ${formatTime(first.open_at)}\n\n` +
+      "🚀 Подготовьтесь к обучению!"
+    );
+  }
+
+  return (
+    "🔔 НОВЫЕ УРОКИ ОТКРЫТЫ!\n\n" +
+    `${lessonList}\n\n` +
+    `🕒 Открытие: ${formatDate(first.open_at)} ${formatTime(first.open_at)}\n\n` +
+    "🚀 Приятного обучения!"
   );
 }
 
@@ -152,6 +206,10 @@ async function loadSchedule(env) {
 // ============================================================
 
 async function sendTelegram(env, chatId, text) {
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    throw new Error("TELEGRAM_BOT_TOKEN is missing");
+  }
+
   const response = await fetch(
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
     {
@@ -224,54 +282,53 @@ async function checkAndSendReminders(env) {
   const now = Date.now();
   const windowMs = REMINDER_MINUTES * 60 * 1000;
 
-  let count = 0;
+  const upcoming = [];
 
-  const upcoming = lessons
-    .filter(lesson => {
-      const openAt = getLessonTime(lesson);
-      const difference = openAt - now;
+  for (const lesson of lessons) {
+    const difference = getLessonTime(lesson) - now;
 
-      return (
-        difference > 0 &&
-        difference <= windowMs
-      );
-    })
-    .sort(sortByOpenTime);
-
-  for (const lesson of upcoming) {
-    if (
-      await wasSent(env, "reminder15", lesson.id)
-    ) {
+    if (difference <= 0 || difference > windowMs) {
       continue;
     }
 
-    const minutesLeft = Math.ceil(
-      (getLessonTime(lesson) - Date.now()) / 60000
+    if (await wasSent(env, "reminder15", lesson.id)) {
+      continue;
+    }
+
+    upcoming.push(lesson);
+  }
+
+  const groups = groupByOpenTime(upcoming);
+  let sentMessages = 0;
+
+  for (const group of groups) {
+    const minutesLeft = Math.max(
+      1,
+      Math.ceil((group.timestamp - Date.now()) / 60000)
     );
 
-    const message =
-      `⏳ До открытия курса осталось ${minutesLeft} мин.!\n\n` +
-      `📚 ${lesson.title}\n` +
-      `📅 ${formatDate(lesson.open_at)}\n` +
-      `⏰ ${formatTime(lesson.open_at)}\n\n` +
-      `Готовьтесь к занятию! 🚀`;
+    const message = buildGroupedNotification(
+      group.lessons,
+      "reminder15",
+      minutesLeft
+    );
 
+    // Сначала отправляем сообщение в Telegram.
     await sendTelegram(
       env,
       env.TELEGRAM_CHAT_ID,
       message
     );
 
-    await markSent(
-      env,
-      "reminder15",
-      lesson.id
-    );
+    // После успешной отправки отмечаем все уроки группы.
+    for (const lesson of group.lessons) {
+      await markSent(env, "reminder15", lesson.id);
+    }
 
-    count++;
+    sentMessages++;
   }
 
-  return count;
+  return sentMessages;
 }
 
 // ============================================================
@@ -284,30 +341,32 @@ async function checkAndSendOpened(env) {
   const now = Date.now();
   const graceMs = OPENED_GRACE_MINUTES * 60 * 1000;
 
-  let count = 0;
+  const available = [];
 
-  const opened = lessons
-    .filter(lesson => {
-      const difference = now - getLessonTime(lesson);
+  for (const lesson of lessons) {
+    const difference = now - getLessonTime(lesson);
 
-      return (
-        difference >= 0 &&
-        difference <= graceMs
-      );
-    })
-    .sort(sortByOpenTime);
-
-  for (const lesson of opened) {
-    if (
-      await wasSent(env, "opened", lesson.id)
-    ) {
+    // Не рассылаем старые уроки при первом запуске.
+    // Учитываем возможную задержку Cron до 20 минут.
+    if (difference < 0 || difference > graceMs) {
       continue;
     }
 
-    const message =
-      `🔔 Новый урок открыт!\n\n` +
-      lessonLabel(lesson) +
-      `\n\n🚀 Приятного обучения!`;
+    if (await wasSent(env, "opened", lesson.id)) {
+      continue;
+    }
+
+    available.push(lesson);
+  }
+
+  const groups = groupByOpenTime(available);
+  let sentMessages = 0;
+
+  for (const group of groups) {
+    const message = buildGroupedNotification(
+      group.lessons,
+      "opened"
+    );
 
     await sendTelegram(
       env,
@@ -315,16 +374,15 @@ async function checkAndSendOpened(env) {
       message
     );
 
-    await markSent(
-      env,
-      "opened",
-      lesson.id
-    );
+    // Сохраняем состояние каждого урока после публикации.
+    for (const lesson of group.lessons) {
+      await markSent(env, "opened", lesson.id);
+    }
 
-    count++;
+    sentMessages++;
   }
 
-  return count;
+  return sentMessages;
 }
 
 // ============================================================
@@ -366,6 +424,10 @@ async function handleCommand(env, chatId, text) {
   const lessons = await loadSchedule(env);
   const now = Date.now();
 
+  // ----------------------------------------------------------
+  // /next
+  // ----------------------------------------------------------
+
   if (command === "/next") {
     const upcoming = lessons
       .filter(lesson => getLessonTime(lesson) > now)
@@ -373,7 +435,11 @@ async function handleCommand(env, chatId, text) {
       .slice(0, 10);
 
     if (!upcoming.length) {
-      return sendTelegram(env, chatId, "Ближайших уроков нет.");
+      return sendTelegram(
+        env,
+        chatId,
+        "Ближайших уроков нет."
+      );
     }
 
     const message =
@@ -383,19 +449,18 @@ async function handleCommand(env, chatId, text) {
     return sendTelegram(env, chatId, message);
   }
 
+  // ----------------------------------------------------------
+  // /today
+  // ----------------------------------------------------------
+
   if (command === "/today") {
     const today = getLocalDate();
 
     const todayLessons = lessons
       .filter(lesson => {
-        const date = new Intl.DateTimeFormat("en-CA", {
-          timeZone: TIMEZONE,
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit"
-        }).format(new Date(lesson.open_at));
-
-        return date === today;
+        return localDateFormatter.format(
+          new Date(lesson.open_at)
+        ) === today;
       })
       .sort(sortByOpenTime);
 
@@ -421,6 +486,10 @@ async function handleCommand(env, chatId, text) {
     return sendTelegram(env, chatId, message);
   }
 
+  // ----------------------------------------------------------
+  // /schedule
+  // ----------------------------------------------------------
+
   if (command === "/schedule") {
     const upcoming = lessons
       .filter(lesson => getLessonTime(lesson) > now)
@@ -428,7 +497,11 @@ async function handleCommand(env, chatId, text) {
       .slice(0, 15);
 
     if (!upcoming.length) {
-      return sendTelegram(env, chatId, "Будущих уроков нет.");
+      return sendTelegram(
+        env,
+        chatId,
+        "Будущих уроков нет."
+      );
     }
 
     const groups = groupByDate(upcoming);
@@ -449,6 +522,10 @@ async function handleCommand(env, chatId, text) {
     return sendTelegram(env, chatId, message.trim());
   }
 
+  // ----------------------------------------------------------
+  // /status
+  // ----------------------------------------------------------
+
   if (command === "/status") {
     const opened = lessons.filter(
       lesson => isOpened(lesson)
@@ -466,6 +543,10 @@ async function handleCommand(env, chatId, text) {
     return sendTelegram(env, chatId, message);
   }
 
+  // ----------------------------------------------------------
+  // /opened
+  // ----------------------------------------------------------
+
   if (command === "/opened") {
     const opened = lessons
       .filter(lesson => isOpened(lesson))
@@ -474,7 +555,11 @@ async function handleCommand(env, chatId, text) {
       .reverse();
 
     if (!opened.length) {
-      return sendTelegram(env, chatId, "Открытых уроков пока нет.");
+      return sendTelegram(
+        env,
+        chatId,
+        "Открытых уроков пока нет."
+      );
     }
 
     const message =
@@ -484,6 +569,10 @@ async function handleCommand(env, chatId, text) {
     return sendTelegram(env, chatId, message);
   }
 
+  // ----------------------------------------------------------
+  // /check
+  // ----------------------------------------------------------
+
   if (command === "/check") {
     const count = await checkAndSendOpened(env);
 
@@ -491,7 +580,7 @@ async function handleCommand(env, chatId, text) {
       env,
       chatId,
       count > 0
-        ? `✅ Отправлено уведомлений об открытии: ${count}`
+        ? `✅ Отправлено сводных уведомлений: ${count}`
         : "✅ Новых открывшихся уроков нет."
     );
   }
@@ -509,7 +598,6 @@ async function handleCommand(env, chatId, text) {
 
 async function handleWebhook(request, env) {
   const update = await request.json();
-
   const message = update.message;
 
   if (!message || !message.text) {
