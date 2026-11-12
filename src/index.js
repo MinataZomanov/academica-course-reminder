@@ -408,11 +408,7 @@ async function checkAndSendOpened(env) {
       "opened"
     );
 
-    await sendTelegram(
-      env,
-      env.TELEGRAM_CHAT_ID,
-      message
-    );
+   await sendTelegramToAll(env, message);
 
     // Сохраняем состояние каждого урока после публикации.
     for (const lesson of group.lessons) {
