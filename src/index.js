@@ -457,6 +457,25 @@ async function handleCommand(env, chatId, text) {
     );
   }
 
+  
+  if (command === "/testgroup") {
+    const testGroupId = "-1004367799048";
+
+    await sendTelegram(
+      env,
+      testGroupId,
+      "🧪 Тестовое сообщение\n\n" +
+      "Academica Course Bot успешно подключил группу!\n\n" +
+      "📚 Уведомления о занятиях будут приходить сюда."
+    );
+
+    return sendTelegram(
+      env,
+      chatId,
+      "✅ Тестовое сообщение отправлено в группу DA - 90 поток."
+    );
+  }
+
   const lessons = await loadSchedule(env);
   const now = Date.now();
 
