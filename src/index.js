@@ -6,12 +6,14 @@ const SCHEDULE_PATH = "schedule.json";
 
 const TIMEZONE = "Asia/Almaty";
 const REMINDER_MINUTES = 15;
-
-// Допускаем задержку Cron до 20 минут.
-// Старые уроки при первом запуске не рассылаются.
 const OPENED_GRACE_MINUTES = 20;
-
 const REMINDER_TTL = 60 * 60 * 24 * 365 * 2;
+
+const TEST_GROUP_ID = "-1004367799048";
+
+// ============================================================
+// DATE AND TIME
+// ============================================================
 
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", {
   timeZone: TIMEZONE,
@@ -65,7 +67,10 @@ function isOpened(lesson) {
   return getLessonTime(lesson) <= Date.now();
 }
 
-// Группировка расписания по календарной дате для /schedule.
+// ============================================================
+// LESSON GROUPING
+// ============================================================
+
 function groupByDate(lessons) {
   const groups = new Map();
 
@@ -82,8 +87,6 @@ function groupByDate(lessons) {
   return groups;
 }
 
-// Группировка уведомлений по точному времени открытия.
-// Уроки с одинаковой датой и временем попадут в одну публикацию.
 function groupByOpenTime(lessons) {
   const groups = new Map();
 
@@ -116,8 +119,11 @@ function lessonLabel(lesson) {
   );
 }
 
-// Формирование одной сводной публикации для всей группы уроков.
-function buildGroupedNotification(lessons, type, minutesLeft = null) {
+function buildGroupedNotification(
+  lessons,
+  type,
+  minutesLeft = null
+) {
   const first = lessons[0];
 
   const lessonList = lessons
@@ -128,7 +134,7 @@ function buildGroupedNotification(lessons, type, minutesLeft = null) {
 
   if (type === "reminder15") {
     return (
-      `⏳ ДО ОТКРЫТИЯ УРОКОВ ОСТАЛОСЬ ${minutesLeft} МИН.! \n\n` +
+      `⏳ ДО ОТКРЫТИЯ УРОКОВ ОСТАЛОСЬ ${minutesLeft} МИН.!\n\n` +
       `${lessonList}\n\n` +
       `🕒 Открытие: ${formatDate(first.open_at)} ${formatTime(first.open_at)}\n\n` +
       "🚀 Подготовьтесь к обучению!"
@@ -168,27 +174,15 @@ async function loadSchedule(env) {
   if (!response.ok) {
     const details = await response.text();
 
-    throw new Error(
-      `GitHub API error ${response.status}: ${details}`
-    );
+    console.error("GITHUB_API_ERROR", JSON.stringify({
+      status: response.status,
+      details: details.slice(0, 1000)
+    }));
+
+    throw new Error(`GitHub API error: ${response.status}`);
   }
 
   const file = await response.json();
-
-  if (!response.ok || !result.ok) {
-  console.error(
-    "TELEGRAM_API_ERROR",
-    JSON.stringify({
-      status: response.status,
-      error_code: result.error_code,
-      description: result.description
-    })
-  );
-
-  throw new Error(
-    `Telegram error: ${JSON.stringify(result)}`
-  );
-}
 
   if (!file.content) {
     throw new Error("schedule.json has no content");
@@ -208,19 +202,27 @@ async function loadSchedule(env) {
     throw new Error("Invalid schedule.json format");
   }
 
-  return lessons.filter(lesson =>
+  const validLessons = lessons.filter(lesson =>
+    lesson &&
     lesson.id &&
     lesson.title &&
     lesson.open_at &&
-    !Number.isNaN(getLessonTime(lesson))
+    Number.isFinite(getLessonTime(lesson))
   );
+
+  console.log("SCHEDULE_LOADED", JSON.stringify({
+    total: lessons.length,
+    valid: validLessons.length
+  }));
+
+  return validLessons;
 }
 
 // ============================================================
-// TELEGRAM
+// TELEGRAM API
 // ============================================================
 
-async function sendTelegram(env, chatId, text) {
+async function sendTelegram(env, chatId, message) {
   if (!env.TELEGRAM_BOT_TOKEN) {
     throw new Error("TELEGRAM_BOT_TOKEN is missing");
   }
@@ -234,24 +236,47 @@ async function sendTelegram(env, chatId, text) {
       },
       body: JSON.stringify({
         chat_id: chatId,
-        text
+        text: message
       })
     }
   );
 
-  const result = await response.json();
+  let result;
 
-  if (!response.ok || !result.ok) {
+  try {
+    result = await response.json();
+  } catch {
     throw new Error(
-      `Telegram error: ${JSON.stringify(result)}`
+      `Telegram returned invalid JSON. HTTP ${response.status}`
     );
   }
+
+  if (!response.ok || !result.ok) {
+    console.error("TELEGRAM_API_ERROR", JSON.stringify({
+      chat_id: chatId,
+      http_status: response.status,
+      error_code: result.error_code ?? null,
+      description: result.description ?? "Unknown Telegram error"
+    }));
+
+    throw new Error(
+      `Telegram error ${result.error_code ?? response.status}: ` +
+      `${result.description ?? "Unknown error"}`
+    );
+  }
+
+  console.log("TELEGRAM_MESSAGE_SENT", JSON.stringify({
+    chat_id: chatId,
+    message_id: result.result?.message_id ?? null
+  }));
 
   return result;
 }
 
+// ============================================================
+// NOTIFICATION RECIPIENTS
+// ============================================================
 
-// Отправка автоматических уведомлений во все настроенные чаты.
 function getNotificationChatIds(env) {
   const configured = env.TELEGRAM_CHAT_IDS?.trim();
 
@@ -260,39 +285,57 @@ function getNotificationChatIds(env) {
     : [env.TELEGRAM_CHAT_ID];
 
   return [...new Set(
-    ids.map(id => String(id ?? "").trim()).filter(Boolean)
+    ids
+      .map(id => String(id ?? "").trim())
+      .filter(Boolean)
   )];
 }
 
-async function sendTelegramToAll(env, text) {
+// Отправка во все чаты.
+// Ошибка одного получателя не скрывает ошибки остальных.
+async function sendTelegramToAll(env, message) {
   const chatIds = getNotificationChatIds(env);
 
   if (chatIds.length === 0) {
-    throw new Error("No Telegram notification recipients configured");
+    throw new Error("No Telegram recipients configured");
   }
 
   const results = await Promise.allSettled(
-    chatIds.map(chatId => sendTelegram(env, chatId, text))
+    chatIds.map(chatId =>
+      sendTelegram(env, chatId, message)
+    )
   );
 
-  const failed = results
-    .map((result, index) => ({
-      result,
-      chatId: chatIds[index]
-    }))
-    .filter(item => item.result.status === "rejected");
+  const failures = [];
 
-  if (failed.length > 0) {
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      failures.push({
+        chat_id: chatIds[index],
+        error: result.reason?.message ?? "Unknown error"
+      });
+    }
+  });
+
+  if (failures.length > 0) {
+    console.error("TELEGRAM_DELIVERY_PARTIAL_FAILURE",
+      JSON.stringify({
+        successful: results.length - failures.length,
+        failed: failures
+      })
+    );
+
     throw new Error(
-      `Failed to send notification to: ${
-        failed.map(item => item.chatId).join(", ")
-      }`
+      `Telegram delivery failed for ${failures.length} recipient(s)`
     );
   }
 
-  return results.length;
-}
+  console.log("TELEGRAM_DELIVERY_COMPLETE", JSON.stringify({
+    recipients: chatIds.length
+  }));
 
+  return chatIds.length;
+}
 
 // ============================================================
 // KV DEDUPLICATION
@@ -316,23 +359,23 @@ async function getNotificationKey(type, lessonId) {
 }
 
 async function wasSent(env, type, lessonId) {
-  const key = await getNotificationKey(type, lessonId);
-
-  return (await env.SENT_KV.get(key)) === "1";
+  return (
+    await env.SENT_KV.get(
+      await getNotificationKey(type, lessonId)
+    )
+  ) === "1";
 }
 
 async function markSent(env, type, lessonId) {
-  const key = await getNotificationKey(type, lessonId);
-
   await env.SENT_KV.put(
-    key,
+    await getNotificationKey(type, lessonId),
     "1",
     { expirationTtl: REMINDER_TTL }
   );
 }
 
 // ============================================================
-// 15-MINUTE REMINDERS
+// NOTIFICATION PROCESSING
 // ============================================================
 
 async function checkAndSendReminders(env) {
@@ -372,10 +415,10 @@ async function checkAndSendReminders(env) {
       minutesLeft
     );
 
-    // Сначала отправляем сообщение в Telegram.
-   await sendTelegramToAll(env, message);
+    // Сначала доставляем во все чаты.
+    // При ошибке KV не помечается, чтобы была повторная попытка.
+    await sendTelegramToAll(env, message);
 
-    // После успешной отправки отмечаем все уроки группы.
     for (const lesson of group.lessons) {
       await markSent(env, "reminder15", lesson.id);
     }
@@ -385,10 +428,6 @@ async function checkAndSendReminders(env) {
 
   return sentMessages;
 }
-
-// ============================================================
-// OPENED LESSON NOTIFICATIONS
-// ============================================================
 
 async function checkAndSendOpened(env) {
   const lessons = await loadSchedule(env);
@@ -401,8 +440,6 @@ async function checkAndSendOpened(env) {
   for (const lesson of lessons) {
     const difference = now - getLessonTime(lesson);
 
-    // Не рассылаем старые уроки при первом запуске.
-    // Учитываем возможную задержку Cron до 20 минут.
     if (difference < 0 || difference > graceMs) {
       continue;
     }
@@ -423,9 +460,8 @@ async function checkAndSendOpened(env) {
       "opened"
     );
 
-   await sendTelegramToAll(env, message);
+    await sendTelegramToAll(env, message);
 
-    // Сохраняем состояние каждого урока после публикации.
     for (const lesson of group.lessons) {
       await markSent(env, "opened", lesson.id);
     }
@@ -468,36 +504,32 @@ async function handleCommand(env, chatId, text) {
       "/schedule - Ближайшее расписание\n" +
       "/status - Состояние расписания\n" +
       "/opened - Последние открытые уроки\n" +
-      "/check - Проверить открывшиеся уроки"
+      "/check - Проверить открывшиеся уроки\n" +
+      "/testgroup - Проверить доставку в группу"
     );
   }
 
-  
+  // Проверка группы не требует загрузки расписания.
   if (command === "/testgroup") {
-    const testGroupId = "-1004367799048";
-
     await sendTelegram(
       env,
-      testGroupId,
-      "🧪 Тестовое сообщение\n\n" +
-      "Academica Course Bot успешно подключил группу!\n\n" +
-      "📚 Уведомления о занятиях будут приходить сюда."
+      TEST_GROUP_ID,
+      "🧪 ТЕСТОВОЕ СООБЩЕНИЕ\n\n" +
+      "Academica Course Bot успешно отправил сообщение в группу!\n\n" +
+      "📚 Проверка подключения завершена."
     );
 
     return sendTelegram(
       env,
       chatId,
-      "✅ Тестовое сообщение отправлено в группу DA - 90 поток."
+      "✅ Telegram принял тестовое сообщение для группы."
     );
   }
 
   const lessons = await loadSchedule(env);
   const now = Date.now();
 
-  // ----------------------------------------------------------
   // /next
-  // ----------------------------------------------------------
-
   if (command === "/next") {
     const upcoming = lessons
       .filter(lesson => getLessonTime(lesson) > now)
@@ -505,33 +537,25 @@ async function handleCommand(env, chatId, text) {
       .slice(0, 10);
 
     if (!upcoming.length) {
-      return sendTelegram(
-        env,
-        chatId,
-        "Ближайших уроков нет."
-      );
+      return sendTelegram(env, chatId, "Ближайших уроков нет.");
     }
 
-    const message =
+    return sendTelegram(
+      env,
+      chatId,
       "📚 Ближайшие 10 уроков:\n\n" +
-      upcoming.map(lessonLabel).join("\n\n");
-
-    return sendTelegram(env, chatId, message);
+      upcoming.map(lessonLabel).join("\n\n")
+    );
   }
 
-  // ----------------------------------------------------------
   // /today
-  // ----------------------------------------------------------
-
   if (command === "/today") {
     const today = getLocalDate();
 
     const todayLessons = lessons
-      .filter(lesson => {
-        return localDateFormatter.format(
-          new Date(lesson.open_at)
-        ) === today;
-      })
+      .filter(lesson =>
+        localDateFormatter.format(new Date(lesson.open_at)) === today
+      )
       .sort(sortByOpenTime);
 
     if (!todayLessons.length) {
@@ -556,10 +580,7 @@ async function handleCommand(env, chatId, text) {
     return sendTelegram(env, chatId, message);
   }
 
-  // ----------------------------------------------------------
   // /schedule
-  // ----------------------------------------------------------
-
   if (command === "/schedule") {
     const upcoming = lessons
       .filter(lesson => getLessonTime(lesson) > now)
@@ -567,15 +588,10 @@ async function handleCommand(env, chatId, text) {
       .slice(0, 15);
 
     if (!upcoming.length) {
-      return sendTelegram(
-        env,
-        chatId,
-        "Будущих уроков нет."
-      );
+      return sendTelegram(env, chatId, "Будущих уроков нет.");
     }
 
     const groups = groupByDate(upcoming);
-
     let message = "📚 Ближайшее расписание:\n\n";
 
     for (const [date, items] of groups) {
@@ -592,57 +608,43 @@ async function handleCommand(env, chatId, text) {
     return sendTelegram(env, chatId, message.trim());
   }
 
-  // ----------------------------------------------------------
   // /status
-  // ----------------------------------------------------------
-
   if (command === "/status") {
-    const opened = lessons.filter(
-      lesson => isOpened(lesson)
-    ).length;
-
+    const opened = lessons.filter(isOpened).length;
     const upcoming = lessons.length - opened;
 
-    const message =
+    return sendTelegram(
+      env,
+      chatId,
       "📊 Состояние расписания\n\n" +
       `📚 Всего уроков: ${lessons.length}\n` +
       `🟢 Открыто: ${opened}\n` +
       `🔒 Ожидается: ${upcoming}\n` +
-      `🕒 Часовой пояс: ${TIMEZONE}`;
-
-    return sendTelegram(env, chatId, message);
+      `🕒 Часовой пояс: ${TIMEZONE}`
+    );
   }
 
-  // ----------------------------------------------------------
   // /opened
-  // ----------------------------------------------------------
-
   if (command === "/opened") {
     const opened = lessons
-      .filter(lesson => isOpened(lesson))
+      .filter(isOpened)
       .sort(sortByOpenTime)
       .slice(-10)
       .reverse();
 
     if (!opened.length) {
-      return sendTelegram(
-        env,
-        chatId,
-        "Открытых уроков пока нет."
-      );
+      return sendTelegram(env, chatId, "Открытых уроков пока нет.");
     }
 
-    const message =
+    return sendTelegram(
+      env,
+      chatId,
       "🟢 Последние открытые уроки:\n\n" +
-      opened.map(lessonLabel).join("\n\n");
-
-    return sendTelegram(env, chatId, message);
+      opened.map(lessonLabel).join("\n\n")
+    );
   }
 
-  // ----------------------------------------------------------
   // /check
-  // ----------------------------------------------------------
-
   if (command === "/check") {
     const count = await checkAndSendOpened(env);
 
@@ -670,7 +672,15 @@ async function handleWebhook(request, env) {
   const update = await request.json();
   const message = update.message;
 
-  if (!message || !message.text) {
+  if (message?.chat) {
+    console.log("TELEGRAM_CHAT_INFO", JSON.stringify({
+      chat_id: message.chat.id,
+      title: message.chat.title ?? null,
+      type: message.chat.type
+    }));
+  }
+
+  if (!message?.text) {
     return new Response("OK");
   }
 
@@ -681,34 +691,41 @@ async function handleWebhook(request, env) {
   }
 
   try {
-    await handleCommand(
-      env,
-      message.chat.id,
-      text
-    );
+    await handleCommand(env, message.chat.id, text);
   } catch (error) {
-    console.error("Command error:", error);
+    console.error("COMMAND_ERROR", JSON.stringify({
+      command: text.split(/\s+/)[0],
+      chat_id: message.chat.id,
+      error: error?.message ?? String(error)
+    }));
 
-    await sendTelegram(
-      env,
-      message.chat.id,
-      "⚠️ Не удалось выполнить команду. Попробуй позже."
-    );
+    // Не создаём вторую необработанную ошибку,
+    // если Telegram не принимает даже сообщение об ошибке.
+    try {
+      await sendTelegram(
+        env,
+        message.chat.id,
+        "⚠️ Не удалось выполнить команду. Подробности сохранены в логах."
+      );
+    } catch (replyError) {
+      console.error("COMMAND_ERROR_REPLY_FAILED", JSON.stringify({
+        chat_id: message.chat.id,
+        error: replyError?.message ?? String(replyError)
+      }));
+    }
   }
 
   return new Response("OK");
 }
 
 // ============================================================
-// WORKER
+// CLOUDFLARE WORKER
 // ============================================================
 
 export default {
   async fetch(request, env, ctx) {
     if (request.method === "GET") {
-      return new Response(
-        "Academica Course Bot is alive! 🤖"
-      );
+      return new Response("Academica Course Bot is alive! 🤖");
     }
 
     if (request.method !== "POST") {
@@ -720,11 +737,11 @@ export default {
     try {
       return await handleWebhook(request, env);
     } catch (error) {
-      console.error("Webhook error:", error);
+      console.error("WEBHOOK_ERROR", JSON.stringify({
+        error: error?.message ?? String(error)
+      }));
 
-      return new Response("Webhook error", {
-        status: 500
-      });
+      return new Response("OK");
     }
   },
 
@@ -733,12 +750,17 @@ export default {
       const reminders = await checkAndSendReminders(env);
       const opened = await checkAndSendOpened(env);
 
-      console.log(
-        `Cron ${controller.cron}: ` +
-        `reminders=${reminders}, opened=${opened}`
-      );
+      console.log("CRON_COMPLETED", JSON.stringify({
+        cron: controller.cron,
+        reminders,
+        opened
+      }));
     } catch (error) {
-      console.error("Scheduled check failed:", error);
+      console.error("SCHEDULED_CHECK_FAILED", JSON.stringify({
+        cron: controller.cron,
+        error: error?.message ?? String(error)
+      }));
+
       throw error;
     }
   }
